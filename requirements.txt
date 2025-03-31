@@ -7,5 +7,3 @@ seaborn==0.13.0
 plotly==5.18.0
 openpyxl==3.1.2
 XlsxWriter==3.1.9
-requests>=2.26.0
-lxml>=4.6.3
