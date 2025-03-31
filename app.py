@@ -61,11 +61,25 @@ BANK_STOCKS = {
 # Market index for CAPM
 MARKET_INDEX = "^NSEI"  # Nifty 50 Index
 
+@st.cache_data(ttl=3600)  # Cache for 1 hour
 def fetch_data(tickers, start_date, end_date):
     """Fetch stock data for given tickers and date range"""
     try:
-        # Download all data first
-        data = yf.download(tickers, start=start_date, end=end_date)
+        # Add debug information
+        st.write(f"Attempting to download data for: {tickers}")
+        
+        # Download all data with optimized parameters
+        data = yf.download(
+            tickers, 
+            start=start_date, 
+            end=end_date,
+            progress=False,  # Disable progress bar
+            timeout=30,      # Increase timeout
+            threads=False    # Disable multithreading which might be restricted
+        )
+        
+        # Debug information
+        st.write(f"Downloaded data shape: {data.shape}")
         
         # Check if data is empty
         if data.empty:
@@ -105,7 +119,36 @@ def fetch_data(tickers, start_date, end_date):
         return adj_close_data
     except Exception as e:
         st.error(f"Error fetching data: {str(e)}")
+        # More detailed error information
+        import traceback
+        st.error(f"Error details: {traceback.format_exc()}")
         return None
+
+def get_mock_data(selected_banks, market_index, start_date, end_date):
+    """Generate mock data if API fails"""
+    # Create a date range
+    date_range = pd.date_range(start=start_date, end=end_date, freq='B')
+    
+    # Create empty DataFrame with dates as index
+    mock_df = pd.DataFrame(index=date_range)
+    
+    # Add columns for each selected bank plus market index
+    all_tickers = [BANK_STOCKS[bank] for bank in selected_banks] + [market_index]
+    
+    # Generate random walk data
+    for ticker in all_tickers:
+        # Start with 1000 as base value
+        start_value = 1000
+        # Generate random walk prices
+        values = [start_value]
+        for _ in range(1, len(date_range)):
+            # Random daily change between -2% and +2%
+            change = 1 + np.random.uniform(-0.02, 0.02)
+            values.append(values[-1] * change)
+        
+        mock_df[ticker] = values
+    
+    return mock_df
 
 def calculate_returns(prices_df):
     """Calculate daily and monthly returns from price data"""
@@ -383,9 +426,13 @@ def main():
     # Sidebar for inputs
     st.sidebar.header("Analysis Parameters")
     
+    # Option to use real or mock data
+    use_real_data = st.sidebar.checkbox("Use Real Market Data", value=True, 
+        help="Uncheck to use simulated data if Yahoo Finance API is unavailable")
+    
     # Date range selection
     today = datetime.today()
-    default_start_date = today - timedelta(days=365*3)  # 3 years ago by default
+    default_start_date = today - timedelta(days=365)  # 1 year ago by default (reduced from 3 years)
     
     start_date = st.sidebar.date_input("Start Date", default_start_date)
     end_date = st.sidebar.date_input("End Date", today)
@@ -418,13 +465,23 @@ def main():
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    status_text.text("Fetching stock data...")
-    # Get stock price data
-    prices_df = fetch_data(all_tickers, start_date, end_date)
-    progress_bar.progress(20)
+    # Fetch data based on user preference
+    if use_real_data:
+        status_text.text("Fetching stock data...")
+        # Get stock price data
+        prices_df = fetch_data(all_tickers, start_date, end_date)
+        progress_bar.progress(20)
+        
+        if prices_df is None or prices_df.empty:
+            st.warning("Real market data unavailable. Switching to simulated data.")
+            prices_df = get_mock_data(selected_banks, MARKET_INDEX, start_date, end_date)
+    else:
+        status_text.text("Generating simulated stock data...")
+        prices_df = get_mock_data(selected_banks, MARKET_INDEX, start_date, end_date)
+        progress_bar.progress(20)
     
-    if prices_df is None or prices_df.empty:
-        st.error("Failed to fetch data. Please check your inputs and try again.")
+    if prices_df is None:
+        st.error("Failed to create data for analysis. Please try again with different parameters.")
         return
     
     # Separate market data
@@ -452,6 +509,10 @@ def main():
     portfolio_results, max_sharpe_port, min_vol_port, portfolio_assets = create_efficient_frontier(daily_returns)
     progress_bar.progress(100)
     status_text.text("Analysis complete!")
+    
+    # Display a notice if using simulated data
+    if not use_real_data or (use_real_data and prices_df is get_mock_data):
+        st.warning("⚠️ NOTICE: Using simulated data for this analysis. Results are for demonstration purposes only.")
     
     # Display results in tabs
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
@@ -555,48 +616,51 @@ def main():
         st.markdown('<div class="subtitle">Download Analysis Data</div>', unsafe_allow_html=True)
         
         # Create Excel file with multiple sheets
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            # Stock prices
-            stock_prices.to_excel(writer, sheet_name='Stock Prices')
+        try:
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                # Stock prices
+                stock_prices.to_excel(writer, sheet_name='Stock Prices')
+                
+                # Returns
+                daily_returns.to_excel(writer, sheet_name='Daily Returns')
+                monthly_returns.to_excel(writer, sheet_name='Monthly Returns')
+                
+                # Risk metrics
+                risk_metrics.to_excel(writer, sheet_name='Risk Metrics')
+                
+                # CAPM results
+                capm_results.to_excel(writer, sheet_name='CAPM Results')
+                
+                # Correlation matrix
+                daily_returns.corr().to_excel(writer, sheet_name='Correlation Matrix')
+                
+                # Portfolio optimization
+                # Optimal portfolio (max Sharpe ratio)
+                max_sharpe_weights = pd.DataFrame({
+                    'Stock': portfolio_assets,
+                    'Weight (%)': max_sharpe_port['Weights'] * 100
+                })
+                max_sharpe_weights.to_excel(writer, sheet_name='Optimal Portfolio')
+                
+                # Min volatility portfolio
+                min_vol_weights = pd.DataFrame({
+                    'Stock': portfolio_assets,
+                    'Weight (%)': min_vol_port['Weights'] * 100
+                })
+                min_vol_weights.to_excel(writer, sheet_name='Min Vol Portfolio')
             
-            # Returns
-            daily_returns.to_excel(writer, sheet_name='Daily Returns')
-            monthly_returns.to_excel(writer, sheet_name='Monthly Returns')
+            output.seek(0)
             
-            # Risk metrics
-            risk_metrics.to_excel(writer, sheet_name='Risk Metrics')
+            st.download_button(
+                label="Download Excel Report",
+                data=output,
+                file_name=f"banking_risk_return_analysis_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        except Exception as e:
+            st.error(f"Error creating Excel file: {str(e)}")
             
-            # CAPM results
-            capm_results.to_excel(writer, sheet_name='CAPM Results')
-            
-            # Correlation matrix
-            daily_returns.corr().to_excel(writer, sheet_name='Correlation Matrix')
-            
-            # Portfolio optimization
-            # Optimal portfolio (max Sharpe ratio)
-            max_sharpe_weights = pd.DataFrame({
-                'Stock': portfolio_assets,
-                'Weight (%)': max_sharpe_port['Weights'] * 100
-            })
-            max_sharpe_weights.to_excel(writer, sheet_name='Optimal Portfolio')
-            
-            # Min volatility portfolio
-            min_vol_weights = pd.DataFrame({
-                'Stock': portfolio_assets,
-                'Weight (%)': min_vol_port['Weights'] * 100
-            })
-            min_vol_weights.to_excel(writer, sheet_name='Min Vol Portfolio')
-        
-        output.seek(0)
-        
-        st.download_button(
-            label="Download Excel Report",
-            data=output,
-            file_name=f"banking_risk_return_analysis_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        
         st.markdown("""
         <div class="caption">
         The Excel report contains all the analyzed data including stock prices, returns, risk metrics, CAPM results, correlation matrix, and optimized portfolio weights.
