@@ -5,10 +5,15 @@ import yfinance as yf
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
+import time
+import requests
 from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
+
+# Set whether to show debug information
+DEBUG_MODE = True
 
 # Set page config
 st.set_page_config(
@@ -61,51 +66,103 @@ BANK_STOCKS = {
 # Market index for CAPM
 MARKET_INDEX = "^NSEI"  # Nifty 50 Index
 
-def fetch_data(tickers, start_date, end_date):
-    """Fetch stock data for given tickers and date range"""
+def check_internet_connection():
+    """Check if internet connection is available"""
     try:
-        # Download all data first
-        data = yf.download(tickers, start=start_date, end=end_date)
-        
-        # Check if data is empty
-        if data.empty:
-            st.error("No data found for the selected stocks and date range.")
-            return None
-            
-        # Handle multindex vs single index case
-        if isinstance(data.columns, pd.MultiIndex):
-            # Check if 'Adj Close' exists in the data
-            if 'Adj Close' in data.columns.levels[0]:
-                # Extract Adj Close data
-                adj_close_data = data['Adj Close']
-            else:
-                # If 'Adj Close' doesn't exist, silently use 'Close' instead
-                if 'Close' in data.columns.levels[0]:
-                    adj_close_data = data['Close']
-                else:
-                    st.error("Price data not available for the selected tickers.")
-                    return None
-        else:
-            # For single ticker, data won't have MultiIndex columns
-            if 'Adj Close' in data.columns:
-                adj_close_data = data['Adj Close'].to_frame(name=tickers[0])
-            else:
-                # Try using 'Close' if 'Adj Close' is not available
-                if 'Close' in data.columns:
-                    adj_close_data = data['Close'].to_frame(name=tickers[0])
-                else:
-                    st.error("Price data not available for the selected ticker.")
-                    return None
-        
-        # Check if we have actual data in the dataframe
-        if adj_close_data.empty or adj_close_data.isnull().all().all():
-            st.error("Data retrieved contains only NaN values. Please check tickers or date range.")
-            return None
-            
-        return adj_close_data
-    except Exception as e:
-        st.error(f"Error fetching data: {str(e)}")
+        # Try connecting to a reliable server
+        requests.get("https://www.google.com", timeout=5)
+        return True
+    except:
+        return False
+
+def fetch_data(tickers, start_date, end_date, max_retries=3):
+    """Fetch stock data for given tickers and date range with retry logic"""
+    if not check_internet_connection():
+        st.error("No internet connection detected. Please check your network and try again.")
         return None
+        
+    if DEBUG_MODE:
+        st.write(f"Attempting to fetch data for tickers: {tickers}")
+        st.write(f"Date range: {start_date} to {end_date}")
+    
+    for attempt in range(max_retries):
+        try:
+            # Create a session with custom User-Agent
+            session = requests.Session()
+            user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            session.headers['User-Agent'] = user_agent
+            
+            # Download data using the session parameter instead of headers
+            data = yf.download(
+                tickers, 
+                start=start_date, 
+                end=end_date, 
+                progress=False,
+                session=session  # Use session parameter instead of headers
+            )
+            
+            # Check if data is empty
+            if data.empty:
+                if attempt < max_retries - 1:
+                    if DEBUG_MODE:
+                        st.warning(f"No data found. Retrying... (Attempt {attempt+1}/{max_retries})")
+                    time.sleep(2)  # Wait before retrying
+                    continue
+                else:
+                    st.error("No data found for the selected stocks and date range.")
+                    return None
+            
+            # Handle multindex vs single index case
+            if isinstance(data.columns, pd.MultiIndex):
+                # Check if 'Adj Close' exists in the data
+                if 'Adj Close' in data.columns.levels[0]:
+                    # Extract Adj Close data
+                    adj_close_data = data['Adj Close']
+                else:
+                    # If 'Adj Close' doesn't exist, silently use 'Close' instead
+                    if 'Close' in data.columns.levels[0]:
+                        adj_close_data = data['Close']
+                    else:
+                        st.error("Price data not available for the selected tickers.")
+                        return None
+            else:
+                # For single ticker, data won't have MultiIndex columns
+                if 'Adj Close' in data.columns:
+                    adj_close_data = data['Adj Close'].to_frame(name=tickers[0])
+                else:
+                    # Try using 'Close' if 'Adj Close' is not available
+                    if 'Close' in data.columns:
+                        adj_close_data = data['Close'].to_frame(name=tickers[0])
+                    else:
+                        st.error("Price data not available for the selected ticker.")
+                        return None
+            
+            # Check if we have actual data in the dataframe
+            if adj_close_data.empty or adj_close_data.isnull().all().all():
+                if attempt < max_retries - 1:
+                    if DEBUG_MODE:
+                        st.warning(f"Retrieved data contains only NaN values. Retrying... (Attempt {attempt+1}/{max_retries})")
+                    time.sleep(2)  # Wait before retrying
+                    continue
+                else:
+                    st.error("Data retrieved contains only NaN values. Please check tickers or date range.")
+                    return None
+                
+            if DEBUG_MODE:
+                st.success(f"Successfully fetched data with shape: {adj_close_data.shape}")
+            
+            return adj_close_data
+            
+        except Exception as e:
+            if attempt < max_retries - 1:
+                if DEBUG_MODE:
+                    st.warning(f"Error fetching data: {str(e)}. Retrying... (Attempt {attempt+1}/{max_retries})")
+                time.sleep(2)  # Wait before retrying
+            else:
+                st.error(f"Error fetching data: {str(e)}")
+                return None
+                
+    return None
 
 def calculate_returns(prices_df):
     """Calculate daily and monthly returns from price data"""
@@ -383,12 +440,13 @@ def main():
     # Sidebar for inputs
     st.sidebar.header("Analysis Parameters")
     
-    # Date range selection
+    # Date range selection - modified for more reliable date ranges
     today = datetime.today()
-    default_start_date = today - timedelta(days=365*3)  # 3 years ago by default
+    default_start_date = today - timedelta(days=365*2)  # 2 years ago by default (reduced from 3)
+    max_end_date = today - timedelta(days=1)  # Yesterday instead of today
     
     start_date = st.sidebar.date_input("Start Date", default_start_date)
-    end_date = st.sidebar.date_input("End Date", today)
+    end_date = st.sidebar.date_input("End Date", max_end_date)
     
     if start_date >= end_date:
         st.error("End date must be after start date.")
@@ -397,11 +455,11 @@ def main():
     # Risk-free rate input
     risk_free_rate = st.sidebar.slider("Risk-Free Rate (%)", min_value=1.0, max_value=10.0, value=3.5) / 100
     
-    # Bank selection
+    # Bank selection - reduced default selection
     selected_banks = st.sidebar.multiselect(
         "Select Banks to Analyze",
         options=list(BANK_STOCKS.keys()),
-        default=list(BANK_STOCKS.keys())[:5]  # Default to first 5 banks
+        default=list(BANK_STOCKS.keys())[:3]  # Default to first 3 banks instead of 5
     )
     
     if not selected_banks:
@@ -419,12 +477,22 @@ def main():
     status_text = st.empty()
     
     status_text.text("Fetching stock data...")
-    # Get stock price data
+    # Get stock price data with improved error handling
     prices_df = fetch_data(all_tickers, start_date, end_date)
     progress_bar.progress(20)
     
     if prices_df is None or prices_df.empty:
         st.error("Failed to fetch data. Please check your inputs and try again.")
+        
+        # Provide troubleshooting suggestions
+        st.markdown("""
+        ### Troubleshooting Suggestions:
+        1. Try selecting fewer stocks at once
+        2. Use a shorter date range (1 year instead of multiple years)
+        3. Avoid very recent dates - data might not be available yet
+        4. Check your internet connection
+        5. Try again in a few minutes - Yahoo Finance API might be temporarily unavailable
+        """)
         return
     
     # Separate market data
